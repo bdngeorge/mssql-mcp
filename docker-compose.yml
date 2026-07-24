@@ -1,0 +1,16 @@
+services:
+  mssql-mcp:
+    container_name: mssql-mcp
+    image: mssql-mcp:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    networks:
+      - mssql-loc
+    env_file: .env
+
+networks:
+  mssql-loc:
+    name: mssql-loc
+    driver: bridge
