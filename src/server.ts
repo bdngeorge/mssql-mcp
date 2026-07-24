@@ -5,6 +5,7 @@ import { z } from "zod";
 import { listTables } from "./tools/listTables.js";
 import { describeTable } from "./tools/describeTable.js";
 import { readQuery } from "./tools/readQuery.js";
+import { formatReadQueryResult } from "./tools/csvFormat.js";
 import { getObjectDefinition } from "./tools/getObjectDefinition.js";
 import { DATA_DATABASES, ALL_DATABASES, closeAllPools } from "./db.js";
 
@@ -56,7 +57,9 @@ function buildServer(): McpServer {
       description:
         "Run a single read-only SELECT (or WITH ... SELECT) statement against the given database. " +
         "Rejects anything that is not exactly one SELECT statement. Includes master (reader + " +
-        "view-definition access only, for querying system/catalog metadata).",
+        "view-definition access only, for querying system/catalog metadata). Output is JSON when " +
+        "the result has maxRowsForJson rows or fewer (preserves exact types), and CSV above that " +
+        "(more compact, but all values are text; SQL NULL is written as the literal token NULL).",
       inputSchema: {
         database: allDbEnum.describe(allDbDescription),
         sql: z.string().describe("A single SELECT statement"),
@@ -67,12 +70,23 @@ function buildServer(): McpServer {
           .max(1000)
           .optional()
           .describe("Max rows to return (default 200, hard cap 1000)"),
+        maxRowsForJson: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Row-count threshold for output format (default 50). Results with this many rows or " +
+              "fewer are returned as JSON (exact types); more than this switches to CSV (compact, " +
+              "text-only). Raise this if you need JSON type fidelity for a larger result."
+          ),
       },
     },
-    async ({ database, sql, maxRows }) => {
+    async ({ database, sql, maxRows, maxRowsForJson }) => {
       try {
         const result = await readQuery(database, sql, maxRows);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        const text = formatReadQueryResult(result, maxRowsForJson ?? 50);
+        return { content: [{ type: "text", text }] };
       } catch (err) {
         return {
           isError: true,
