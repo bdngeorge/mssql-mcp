@@ -1,4 +1,5 @@
-import express, { Request, Response } from "express";
+import crypto from "node:crypto";
+import express, { NextFunction, Request, Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -119,8 +120,36 @@ function buildServer(): McpServer {
   return server;
 }
 
+const useAuth = Boolean(Number(process.env.MCP_USE_AUTH));
+const authToken = process.env.MCP_AUTH_TOKEN;
+if (useAuth && !authToken) {
+  throw new Error("Missing required environment variable: MCP_AUTH_TOKEN");
+}
+
+function checkAuth(req: Request, res: Response, next: NextFunction): void {
+  const header = req.header("authorization") ?? "";
+  const [scheme, token] = header.split(" ");
+  const provided = Buffer.from(scheme === "Bearer" ? token ?? "" : "");
+  const expected = Buffer.from(authToken as string);
+  const authorized =
+    provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+
+  if (!authorized) {
+    res.status(401).json({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Unauthorized: missing or invalid bearer token." },
+      id: null,
+    });
+    return;
+  }
+  next();
+}
+
 const app = express();
 app.use(express.json());
+if (useAuth) {
+  app.use("/mcp", checkAuth);
+}
 
 // Stateless Streamable HTTP: a fresh server + transport per request avoids
 // cross-request session bugs and keeps this simple for a single local client.

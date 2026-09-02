@@ -1,7 +1,7 @@
-# Docker Compose (Reverse Proxied)
+# Docker Compose (Local)
 # ===============================================
-# Connects with NGINX to reverse proxy the MCP
-# so it can be easily accessible to other machines
+# Use this compose file if you want to run this
+# MCP locally instead of reverse proxied
 # ===============================================
 
 services:
@@ -11,12 +11,12 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8199:8199"
+      - "8199:8199"
     networks:
-      - proxy
-    env_file: .env
+      - mssql-loc
+    env_file: .env.local
 
 networks:
-  proxy:
-    name: proxy
-    external: true
+  mssql-loc:
+    name: mssql-loc
+    driver: bridge
