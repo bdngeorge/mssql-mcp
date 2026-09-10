@@ -1,5 +1,6 @@
 import sql from "mssql";
 import { getPool } from "../db.js";
+import { ServerConfig } from "../config.js";
 
 export interface ColumnInfo {
   column: string;
@@ -10,11 +11,12 @@ export interface ColumnInfo {
 }
 
 export async function describeTable(
+  serverCfg: ServerConfig,
   database: string,
   schemaName: string,
   tableName: string
 ): Promise<ColumnInfo[]> {
-  const pool = await getPool(database);
+  const pool = await getPool(serverCfg, database);
   const result = await pool
     .request()
     .input("schema", sql.NVarChar, schemaName)

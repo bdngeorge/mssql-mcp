@@ -1,16 +1,18 @@
 import sql from "mssql";
 import { getPool } from "../db.js";
+import { ServerConfig } from "../config.js";
 
 export interface ObjectDefinitionResult {
   definition: string | null;
 }
 
 export async function getObjectDefinition(
+  serverCfg: ServerConfig,
   database: string,
   schemaName: string,
   objectName: string
 ): Promise<ObjectDefinitionResult> {
-  const pool = await getPool(database);
+  const pool = await getPool(serverCfg, database);
   const result = await pool
     .request()
     .input("schema", sql.NVarChar, schemaName)

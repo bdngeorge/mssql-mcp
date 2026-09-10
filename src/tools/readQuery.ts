@@ -1,4 +1,5 @@
 import { getPool } from "../db.js";
+import { ServerConfig } from "../config.js";
 import { assertReadOnlySelect } from "./sqlGuard.js";
 
 const DEFAULT_MAX_ROWS = 200;
@@ -11,6 +12,7 @@ export interface ReadQueryResult {
 }
 
 export async function readQuery(
+  serverCfg: ServerConfig,
   database: string,
   rawSql: string,
   requestedMaxRows?: number
@@ -18,7 +20,7 @@ export async function readQuery(
   const query = assertReadOnlySelect(rawSql);
   const maxRows = Math.min(requestedMaxRows ?? DEFAULT_MAX_ROWS, HARD_MAX_ROWS);
 
-  const pool = await getPool(database);
+  const pool = await getPool(serverCfg, database);
   const result = await pool.request().query(query);
   const rows: Record<string, unknown>[] = result.recordset ?? [];
   const truncated = rows.length > maxRows;

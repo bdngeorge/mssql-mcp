@@ -1,38 +1,16 @@
 import sql from "mssql";
+import { ServerConfig } from "./config.js";
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
-function parseDatabaseNames(): string[] {
-  const names = requireEnv("DB_NAMES")
-    .split(",")
-    .map((name) => name.trim())
-    .filter((name) => name.length > 0);
-  if (names.length === 0) {
-    throw new Error("DB_NAMES must contain at least one database name.");
-  }
-  return names;
-}
-
-export const DATA_DATABASES: string[] = parseDatabaseNames();
-export const ALL_DATABASES: string[] = [...DATA_DATABASES, "master"];
-
-function buildConfig(database: string): sql.config {
+function buildConfig(serverCfg: ServerConfig, database: string): sql.config {
   return {
-    server: requireEnv("DB_SERVER"),
-    port: Number(process.env.DB_PORT ?? 1433),
+    server: serverCfg.server,
+    port: serverCfg.port,
     database,
-    user: requireEnv("DB_USER"),
-    password: requireEnv("DB_PASSWORD"),
+    user: serverCfg.user,
+    password: serverCfg.password,
     options: {
-      encrypt: (process.env.DB_ENCRYPT ?? "true").toLowerCase() === "true",
-      trustServerCertificate:
-        (process.env.DB_TRUST_SERVER_CERTIFICATE ?? "false").toLowerCase() === "true",
+      encrypt: serverCfg.encrypt,
+      trustServerCertificate: serverCfg.trustServerCertificate,
     },
     pool: {
       max: 5,
@@ -43,31 +21,39 @@ function buildConfig(database: string): sql.config {
   };
 }
 
-const pools = new Map<string, Promise<sql.ConnectionPool>>();
+const pools = new Map<string, Map<string, Promise<sql.ConnectionPool>>>();
 
-export function getPool(database: string): Promise<sql.ConnectionPool> {
-  if (!ALL_DATABASES.includes(database)) {
+export function getPool(serverCfg: ServerConfig, database: string): Promise<sql.ConnectionPool> {
+  const allowed = [...serverCfg.databases, "master"];
+  if (!allowed.includes(database)) {
     throw new Error(
-      `Unknown database "${database}". Allowed databases: ${ALL_DATABASES.join(", ")}`
+      `Unknown database "${database}" for server "${serverCfg.nickname}". Allowed databases: ${allowed.join(", ")}`
     );
   }
 
-  let poolPromise = pools.get(database);
+  let byDatabase = pools.get(serverCfg.nickname);
+  if (!byDatabase) {
+    byDatabase = new Map();
+    pools.set(serverCfg.nickname, byDatabase);
+  }
+
+  let poolPromise = byDatabase.get(database);
   if (!poolPromise) {
-    poolPromise = new sql.ConnectionPool(buildConfig(database)).connect().catch((err) => {
-      pools.delete(database);
+    const currentByDatabase = byDatabase;
+    poolPromise = new sql.ConnectionPool(buildConfig(serverCfg, database)).connect().catch((err) => {
+      currentByDatabase.delete(database);
       throw err;
     });
-    pools.set(database, poolPromise);
+    byDatabase.set(database, poolPromise);
   }
   return poolPromise;
 }
 
 export async function closeAllPools(): Promise<void> {
-  const entries = [...pools.entries()];
+  const entries = [...pools.values()].flatMap((byDatabase) => [...byDatabase.values()]);
   pools.clear();
   await Promise.all(
-    entries.map(async ([, poolPromise]) => {
+    entries.map(async (poolPromise) => {
       const pool = await poolPromise;
       await pool.close();
     })

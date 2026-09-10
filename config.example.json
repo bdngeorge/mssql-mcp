@@ -1,0 +1,24 @@
+{
+  "servers": [
+    {
+      "nickname": "prod",
+      "isDefault": true,
+      "server": "sql-prod.internal",
+      "port": 1433,
+      "user": "readonly_user",
+      "password": "change-me",
+      "encrypt": true,
+      "trustServerCertificate": false,
+      "databases": ["Db1", "Db2"],
+      "defaultDatabase": "Db1"
+    },
+    {
+      "nickname": "staging",
+      "server": "sql-staging.internal",
+      "port": 1433,
+      "user": "readonly_user",
+      "password": "change-me",
+      "databases": ["Db1"]
+    }
+  ]
+}
