@@ -8,29 +8,95 @@ import { describeTable } from "./tools/describeTable.js";
 import { readQuery } from "./tools/readQuery.js";
 import { formatReadQueryResult } from "./tools/csvFormat.js";
 import { getObjectDefinition } from "./tools/getObjectDefinition.js";
-import { DATA_DATABASES, ALL_DATABASES, closeAllPools } from "./db.js";
+import { closeAllPools } from "./db.js";
+import {
+  SERVERS,
+  DEFAULT_SERVER,
+  resolveServer,
+  resolveDataDatabase,
+  resolveDatabase,
+} from "./config.js";
 
-const dataDbEnum = z.enum(DATA_DATABASES as [string, ...string[]]);
-const allDbEnum = z.enum(ALL_DATABASES as [string, ...string[]]);
+function describeServers(includeMaster: boolean): string {
+  return SERVERS.map((s) => {
+    const dbs = includeMaster ? [...s.databases, "master"] : s.databases;
+    const defaultDb = s.defaultDatabase ?? s.databases[0];
+    const marker = s === DEFAULT_SERVER ? " [default server]" : "";
+    return `${s.nickname}${marker}: databases=[${dbs.join(", ")}] (default database: ${defaultDb})`;
+  }).join("; ");
+}
 
-const dataDbDescription = `Database to query. One of: ${DATA_DATABASES.join(", ")}`;
-const allDbDescription = `Database to query. One of: ${ALL_DATABASES.join(", ")}`;
+const serverField = z
+  .string()
+  .optional()
+  .describe(`Server nickname to target. Optional — defaults to the default server. Servers: ${describeServers(false)}`);
+
+const dataDbField = z
+  .string()
+  .optional()
+  .describe(
+    `Database to query (master not allowed here). Optional — defaults to the target server's ` +
+      `default database. Per-server lists: ${describeServers(false)}`
+  );
+
+const allDbField = z
+  .string()
+  .optional()
+  .describe(
+    `Database to query, including master. Optional — defaults to the target server's default ` +
+      `database. Per-server lists: ${describeServers(true)}`
+  );
+
+function errorResult(err: unknown) {
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
+  };
+}
 
 function buildServer(): McpServer {
   const server = new McpServer({ name: "mssql-mcp", version: "1.0.0" });
 
   server.registerTool(
+    "list_servers",
+    {
+      title: "List Servers",
+      description:
+        "List configured SQL Server instances and their available databases, including which " +
+        "server/database is used by default when not specified. master is always additionally " +
+        "available on read_query/get_object_definition but is omitted from the databases lists here.",
+      inputSchema: {},
+    },
+    async () => {
+      const result = SERVERS.map((s) => ({
+        nickname: s.nickname,
+        isDefault: s === DEFAULT_SERVER,
+        databases: s.databases,
+        defaultDatabase: s.defaultDatabase ?? s.databases[0],
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
     "list_tables",
     {
       title: "List Tables",
-      description: "List all base tables (schema + name) in the given database.",
+      description: "List all base tables (schema + name) in the given server/database.",
       inputSchema: {
-        database: dataDbEnum.describe(dataDbDescription),
+        server: serverField,
+        database: dataDbField,
       },
     },
-    async ({ database }) => {
-      const tables = await listTables(database);
-      return { content: [{ type: "text", text: JSON.stringify(tables, null, 2) }] };
+    async ({ server: serverArg, database: databaseArg }) => {
+      try {
+        const serverCfg = resolveServer(serverArg);
+        const database = resolveDataDatabase(serverCfg, databaseArg);
+        const tables = await listTables(serverCfg, database);
+        return { content: [{ type: "text", text: JSON.stringify(tables, null, 2) }] };
+      } catch (err) {
+        return errorResult(err);
+      }
     }
   );
 
@@ -40,14 +106,21 @@ function buildServer(): McpServer {
       title: "Describe Table",
       description: "List columns (name, data type, nullability, default) for a table.",
       inputSchema: {
-        database: dataDbEnum.describe(dataDbDescription),
+        server: serverField,
+        database: dataDbField,
         schema: z.string().default("dbo").describe("Schema name, defaults to dbo"),
         table: z.string().describe("Table name"),
       },
     },
-    async ({ database, schema, table }) => {
-      const columns = await describeTable(database, schema, table);
-      return { content: [{ type: "text", text: JSON.stringify(columns, null, 2) }] };
+    async ({ server: serverArg, database: databaseArg, schema, table }) => {
+      try {
+        const serverCfg = resolveServer(serverArg);
+        const database = resolveDataDatabase(serverCfg, databaseArg);
+        const columns = await describeTable(serverCfg, database, schema, table);
+        return { content: [{ type: "text", text: JSON.stringify(columns, null, 2) }] };
+      } catch (err) {
+        return errorResult(err);
+      }
     }
   );
 
@@ -56,13 +129,15 @@ function buildServer(): McpServer {
     {
       title: "Read Query",
       description:
-        "Run a single read-only SELECT (or WITH ... SELECT) statement against the given database. " +
-        "Rejects anything that is not exactly one SELECT statement. Includes master (reader + " +
-        "view-definition access only, for querying system/catalog metadata). Output is JSON when " +
-        "the result has maxRowsForJson rows or fewer (preserves exact types), and CSV above that " +
-        "(more compact, but all values are text; SQL NULL is written as the literal token NULL).",
+        "Run a single read-only SELECT (or WITH ... SELECT) statement against the given " +
+        "server/database. Rejects anything that is not exactly one SELECT statement. Includes " +
+        "master (reader + view-definition access only, for querying system/catalog metadata). " +
+        "Output is JSON when the result has maxRowsForJson rows or fewer (preserves exact types), " +
+        "and CSV above that (more compact, but all values are text; SQL NULL is written as the " +
+        "literal token NULL).",
       inputSchema: {
-        database: allDbEnum.describe(allDbDescription),
+        server: serverField,
+        database: allDbField,
         sql: z.string().describe("A single SELECT statement"),
         maxRows: z
           .number()
@@ -83,16 +158,15 @@ function buildServer(): McpServer {
           ),
       },
     },
-    async ({ database, sql, maxRows, maxRowsForJson }) => {
+    async ({ server: serverArg, database: databaseArg, sql, maxRows, maxRowsForJson }) => {
       try {
-        const result = await readQuery(database, sql, maxRows);
+        const serverCfg = resolveServer(serverArg);
+        const database = resolveDatabase(serverCfg, databaseArg);
+        const result = await readQuery(serverCfg, database, sql, maxRows);
         const text = formatReadQueryResult(result, maxRowsForJson ?? 50);
         return { content: [{ type: "text", text }] };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
-        };
+        return errorResult(err);
       }
     }
   );
@@ -106,14 +180,21 @@ function buildServer(): McpServer {
         "using the login's VIEW DEFINITION permission. Returns null if the object doesn't exist or " +
         "isn't visible to this login. Includes master.",
       inputSchema: {
-        database: allDbEnum.describe(allDbDescription),
+        server: serverField,
+        database: allDbField,
         schema: z.string().default("dbo").describe("Schema name, defaults to dbo"),
         object: z.string().describe("Object name (procedure, view, function, trigger, ...)"),
       },
     },
-    async ({ database, schema, object }) => {
-      const result = await getObjectDefinition(database, schema, object);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    async ({ server: serverArg, database: databaseArg, schema, object }) => {
+      try {
+        const serverCfg = resolveServer(serverArg);
+        const database = resolveDatabase(serverCfg, databaseArg);
+        const result = await getObjectDefinition(serverCfg, database, schema, object);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return errorResult(err);
+      }
     }
   );
 
