@@ -63,16 +63,18 @@ This is defense-in-depth on top of the SQL login itself, which should already be
    docker compose logs -f mssql-mcp
    ```
 
-## nginx reverse proxy (TLS termination)
+## nginx reverse proxy
 
-TLS termination and public exposure are handled by a separate, standalone nginx stack at `/srv/docker/nginx` — not part of this project — so it can front other services too. It terminates TLS on port `443` and proxies `/mcp` to this container over a shared external Docker network named `proxy`. `mssql-mcp` itself only binds to `127.0.0.1:8199` on the host, for local debugging; nginx is the only externally reachable entry point.
+Reverse proxying and public exposure are handled by a separate, standalone nginx stack at `/srv/docker/nginx` — not part of this project — so it can front other services too. It proxies `/mcp` to this container over a shared external Docker network named `proxy`. `mssql-mcp` itself only binds to `127.0.0.1:8199` on the host, for local debugging; nginx is the only externally reachable entry point.
+
+nginx currently proxies plain HTTP on port `80`, with no TLS — the LAN-only host plus the bearer token (below) are considered sufficient here, so the self-signed-cert overhead (generating it, distributing it, getting every client machine to trust it) isn't worth carrying. Access control is entirely the bearer token's job in this setup; nginx adds no auth of its own. The stack keeps `443:443` mapped alongside `80:80` so TLS can be turned back on later (e.g. if this ever needs to be reachable beyond the LAN) without a port-mapping change — see `/srv/docker/nginx/examples/https.example.conf` for a TLS server-block template, and its `README.md` for cert-regeneration instructions.
 
 Both stacks reference the `proxy` network as `external: true`, so it must exist before either is started:
 ```
 docker network create proxy
 ```
 
-See `/srv/docker/nginx/conf.d/mssql-mcp.conf` for the proxy config, and `/srv/docker/nginx/README.md` for cert-regeneration instructions. This repo also carries a copy of that same server block at `examples/mssql-mcp.example.conf`, so you don't need access to `/srv/docker/nginx` to see (or reuse) what the proxy config looks like — copy it into that nginx stack's `conf.d/` if setting the proxy up from scratch.
+See `/srv/docker/nginx/conf.d/mssql-mcp.conf` for the proxy config. This repo also carries a copy of that same server block at `examples/mssql-mcp.example.conf`, so you don't need access to `/srv/docker/nginx` to see (or reuse) what the proxy config looks like — copy it into that nginx stack's `conf.d/` if setting the proxy up from scratch.
 
 ## Running locally without nginx
 
@@ -103,7 +105,7 @@ Behind nginx, passing the bearer token as a header:
   "mcpServers": {
     "mssql": {
       "type": "http",
-      "url": "https://<host>/mcp",
+      "url": "http://<host>/mcp",
       "headers": {
         "Authorization": "Bearer <value of MCP_AUTH_TOKEN>"
       }
@@ -112,7 +114,7 @@ Behind nginx, passing the bearer token as a header:
 }
 ```
 
-Use the host's LAN IP (or hostname, once you have DNS pointing at it) for `<host>`. No port is needed — nginx listens on the standard HTTPS port 443.
+Use the host's LAN IP (or hostname, once you have DNS pointing at it) for `<host>`. No port is needed — nginx listens on the standard HTTP port 80.
 
 Running locally without nginx (`docker-compose.local.yml`), plain HTTP on port `8199` — drop the `headers` block entirely if `MCP_USE_AUTH=0`, keep it (with `http://` in the URL) if you left auth on:
 
