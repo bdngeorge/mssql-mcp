@@ -1,7 +1,8 @@
 # Docker Compose (Reverse Proxied)
 # ===============================================
-# Connects with NGINX to reverse proxy the MCP
-# so it can be easily accessible to other machines
+# Joins the shared `proxy` network so a reverse proxy
+# (run separately) can front this container
+# and make it accessible to other machines
 # ===============================================
 
 services:

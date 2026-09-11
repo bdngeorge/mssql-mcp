@@ -36,22 +36,22 @@ This is defense-in-depth on top of the SQL login itself, which should already be
 
    `config.json` is gitignored — it holds credentials, same as `.env`.
 
-2. Copy `.env.example` to `.env` (or to `.env.local` if you're running without nginx — see [Running locally without nginx](#running-locally-without-nginx)):
+2. Copy `.env.example` to `.env` (or to `.env.local` if you're running without a reverse proxy — see [Running locally without a reverse proxy](#running-locally-without-a-reverse-proxy)):
    ```
    cp .env.example .env
    ```
    - `MCP_CONFIG_PATH` — path to the config file. Defaults to `/app/config.json`, which matches the volume mount below — you shouldn't need to change this for Docker. Only override it for non-Docker local runs (e.g. `./config.json`).
    - `MCP_PORT` — port the server listens on inside the container (defaults to `8090` if unset). Leave at `8199` to match the host port mapping in both `docker-compose.yml` and `docker-compose.local.yml`.
-   - `MCP_USE_AUTH` — `1` to require the bearer token below, `0` to disable auth entirely. **Leaving it unset behaves like `0` (auth disabled)** — always set it explicitly. Keep this `1` whenever the server is reachable by anything other than yourself (i.e. the nginx-fronted setup below). Only set it to `0` for the local/trusted-network setup.
+   - `MCP_USE_AUTH` — `1` to require the bearer token below, `0` to disable auth entirely. **Leaving it unset behaves like `0` (auth disabled)** — always set it explicitly. Keep this `1` whenever the server is reachable by anything other than yourself (i.e. the proxied setup below). Only set it to `0` for the local/trusted-network setup.
    - `MCP_AUTH_TOKEN` — a random shared secret clients must send as `Authorization: Bearer <token>`. Generate one with `openssl rand -hex 32`. Required if `MCP_USE_AUTH=1` (the server refuses to start without it); can be left empty if `MCP_USE_AUTH=0`.
 
 3. Build and start the container. Both compose files mount `./config.json` into the container read-only, so it must exist at the repo root before starting — the server fails fast (and the container exits) if it's missing or invalid. There are two ways to run it — pick one:
 
-   - **Behind nginx (recommended)** — uses `docker-compose.yml` + `.env`, binds only to `127.0.0.1:8199` on the host, and needs the separate nginx stack (see below) for any external access:
+   - **Behind a reverse proxy (recommended)** — uses `docker-compose.yml` + `.env`, binds only to `127.0.0.1:8199` on the host, and needs a reverse proxy in front of it (see below) for any external access:
      ```
      docker compose up --build -d
      ```
-   - **Without nginx** — uses `docker-compose.local.yml` + `.env.local`; see [Running locally without nginx](#running-locally-without-nginx) below before using this.
+   - **Without a reverse proxy** — uses `docker-compose.local.yml` + `.env.local`; see [Running locally without a reverse proxy](#running-locally-without-a-reverse-proxy) below before using this.
      ```
      docker compose -f docker-compose.local.yml up --build -d
      ```
@@ -63,20 +63,16 @@ This is defense-in-depth on top of the SQL login itself, which should already be
    docker compose logs -f mssql-mcp
    ```
 
-## nginx reverse proxy
+## Reverse proxy
 
-Reverse proxying and public exposure are handled by a separate, standalone nginx stack at `/srv/docker/nginx` — not part of this project — so it can front other services too. It proxies `/mcp` to this container over a shared external Docker network named `proxy`. `mssql-mcp` itself only binds to `127.0.0.1:8199` on the host, for local debugging; nginx is the only externally reachable entry point.
-
-nginx currently proxies plain HTTP on port `80`, with no TLS — the LAN-only host plus the bearer token (below) are considered sufficient here, so the self-signed-cert overhead (generating it, distributing it, getting every client machine to trust it) isn't worth carrying. Access control is entirely the bearer token's job in this setup; nginx adds no auth of its own. The stack keeps `443:443` mapped alongside `80:80` so TLS can be turned back on later (e.g. if this ever needs to be reachable beyond the LAN) without a port-mapping change — see `/srv/docker/nginx/examples/https.example.conf` for a TLS server-block template, and its `README.md` for cert-regeneration instructions.
-
-Both stacks reference the `proxy` network as `external: true`, so it must exist before either is started:
+This container binds only to `127.0.0.1:8199` on the host (`docker-compose.yml`) — it expects a reverse proxy, run separately from this project, to front it for any access beyond the host itself. `docker-compose.yml` declares the `proxy` network as `external: true`, so a reverse proxy just needs to join that same Docker network and forward to `mssql-mcp:8199`:
 ```
-docker network create proxy
+docker network create proxy   # once, before starting either this or the proxy
 ```
 
-See `/srv/docker/nginx/conf.d/mssql-mcp.conf` for the proxy config. This repo also carries a copy of that same server block at `examples/mssql-mcp.example.conf`, so you don't need access to `/srv/docker/nginx` to see (or reuse) what the proxy config looks like — copy it into that nginx stack's `conf.d/` if setting the proxy up from scratch.
+`examples/mssql-mcp.example.conf` in this repo is a minimal nginx `location` block proxying `/mcp`, in case that's what's fronting it — adapt it (or the equivalent) for whatever reverse proxy is actually in use. Access control here is entirely the bearer token's job (below), regardless of what's in front of it — the proxy doesn't need auth of its own, though nothing stops you from layering it on.
 
-## Running locally without nginx
+## Running locally without a reverse proxy
 
 For a trusted host/network where TLS termination and a reverse proxy aren't needed, use `docker-compose.local.yml` instead of `docker-compose.yml`. It mounts the same `./config.json` at the repo root, so that still needs to exist first:
 
@@ -86,19 +82,19 @@ cp .env.example .env.local
 docker compose -f docker-compose.local.yml up --build -d
 ```
 
-This differs from the nginx-fronted setup in a few ways:
+This differs from the proxied setup in a few ways:
 
 - It reads `.env.local` instead of `.env`.
 - It publishes port `8199` on **all interfaces** (`0.0.0.0`), not just `127.0.0.1` — anything that can reach the host on the network can reach `/mcp` directly, over plain HTTP (no TLS).
 - It uses its own bridge network (`mssql-loc`) instead of the shared external `proxy` network, so `docker network create proxy` isn't needed for this path.
 
-Because there's no nginx in front to terminate TLS or require a token, set `MCP_USE_AUTH=0` only if the host/network is trusted; otherwise leave `MCP_USE_AUTH=1` and set `MCP_AUTH_TOKEN` even in this mode.
+Because there's no reverse proxy in front to terminate TLS or require a token, set `MCP_USE_AUTH=0` only if the host/network is trusted; otherwise leave `MCP_USE_AUTH=1` and set `MCP_AUTH_TOKEN` even in this mode.
 
 ## Connecting a client
 
 Point Claude Desktop / Claude Code at the running server (Streamable HTTP transport, not a launched command).
 
-Behind nginx, passing the bearer token as a header:
+Behind a reverse proxy, passing the bearer token as a header:
 
 ```json
 {
@@ -114,9 +110,9 @@ Behind nginx, passing the bearer token as a header:
 }
 ```
 
-Use the host's LAN IP (or hostname, once you have DNS pointing at it) for `<host>`. No port is needed — nginx listens on the standard HTTP port 80.
+Use the host's LAN IP (or hostname, once you have DNS pointing at it) for `<host>`. Omit the port if the reverse proxy listens on the standard HTTP (80) or HTTPS (443) port; include it otherwise.
 
-Running locally without nginx (`docker-compose.local.yml`), plain HTTP on port `8199` — drop the `headers` block entirely if `MCP_USE_AUTH=0`, keep it (with `http://` in the URL) if you left auth on:
+Running locally without a reverse proxy (`docker-compose.local.yml`), plain HTTP on port `8199` — drop the `headers` block entirely if `MCP_USE_AUTH=0`, keep it (with `http://` in the URL) if you left auth on:
 
 ```json
 {
@@ -144,4 +140,4 @@ MCP_CONFIG_PATH=./config.json npm start
 
 - The server is stateless (no MCP session persistence) — each HTTP request gets a fresh transport/server pair. GET and DELETE on `/mcp` return 405 since there's no session stream or session to delete.
 - When `MCP_USE_AUTH=1`, every request to `/mcp` requires `Authorization: Bearer <MCP_AUTH_TOKEN>`; a missing or wrong token gets a 401. This is a single shared secret, not per-user identity — anyone with the token has full read access. Rotate it (update `.env`/`.env.local`, `docker compose up -d`) if it ever leaks, and update every connected client's config.
-- `MCP_USE_AUTH=0` — or leaving it unset — disables that check entirely; every request is treated as authorized regardless of headers. Only use this with `docker-compose.local.yml` on a trusted host/network; never set it to `0` (or leave it unset) on the nginx-fronted setup, since nginx has no auth of its own and `/mcp` would become unauthenticated for anyone who can reach it.
+- `MCP_USE_AUTH=0` — or leaving it unset — disables that check entirely; every request is treated as authorized regardless of headers. Only use this with `docker-compose.local.yml` on a trusted host/network; never set it to `0` (or leave it unset) on the proxied setup, since the reverse proxy may have no auth of its own, and `/mcp` would become unauthenticated for anyone who can reach it.
